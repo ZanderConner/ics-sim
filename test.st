@@ -1,0 +1,20 @@
+PROGRAM main
+VAR
+    UINT16_1148 : INT;
+    UINT16_2305 : INT;
+    REAL_4188   : REAL;
+END_VAR
+
+(* keep the body syntactically non-empty to satisfy strict parsers *)
+UINT16_1148 := UINT16_1148;
+UINT16_2305 := UINT16_2305;
+REAL_4188   := REAL_4188;
+
+END_PROGRAM
+
+CONFIGURATION Config0
+RESOURCE Res0 ON PLC
+    TASK MainTask (INTERVAL := T#100ms, PRIORITY := 1);
+    PROGRAM MainInst WITH MainTask : main;
+END_RESOURCE
+END_CONFIGURATION

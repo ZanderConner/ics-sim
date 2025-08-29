@@ -1,0 +1,65 @@
+version: '3'
+services: 
+  database:
+      container_name: mysql
+      image: mysql/mysql-server:5.7
+      ports:
+          - "3306:3306"
+      environment: 
+          - MYSQL_ROOT_PASSWORD=root
+          - MYSQL_USER=root
+          - MYSQL_PASSWORD=root
+          - MYSQL_DATABASE=scadalts
+      expose: ["3306"]
+      volumes:
+          -   ./docker/volumes/databases:/home/
+      networks:
+        ics_net:
+          ipv4_address: 192.25.0.6
+        default:
+  scadalts:
+      image: scadalts/scadalts:latest
+      ports: 
+          - "8080:8080"
+      depends_on: 
+          - database
+      expose: ["8080", "8000"]
+      links:
+          - database:database
+      networks:
+        ics_net:
+          ipv4_address: 192.25.0.7
+        default:
+  openplc:
+      image: openplc:latest
+      depends_on:
+        - scadalts
+      networks:
+        ics_net:
+          ipv4_address: 192.25.0.8
+        default:
+  slavedevice:
+      image: modbus-sim:latest
+      depends_on:
+        - openplc
+      ports:
+        - "5020:5020"
+      networks:
+        ics_net:
+          ipv4_address: 192.25.0.9
+        default:
+      tty: true
+      environment:
+        HOST: "0.0.0.0"
+        PORT: "5020"
+        UNIT_ID: "1"
+
+
+networks:
+  ics_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.25.0.0/16
+          ip_range: 192.25.0.0/24
+          gateway: 192.25.0.1
