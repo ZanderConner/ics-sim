@@ -1,0 +1,481 @@
+PROGRAM programTest
+  VAR
+    Level_cm : UINT;
+    Q_in_lps : UINT;
+    Q_out_lps : UINT;
+    Temp_C : REAL;
+    Pressure_kPa : UINT;
+    StatusWord : UINT;
+    HighLevel_DI : BOOL;
+    HighTemp_DI : BOOL;
+    HL_Alarm : BOOL;
+    HT_Alarm : BOOL;
+    PumpCmd : BOOL;
+    HeaterCmd : BOOL;
+    ManualMode : BOOL;
+    Level_SP : UINT := 600;
+    Temp_SP_C : REAL := 50.0;
+    Inflow_SP : UINT := 60;
+    ValvePct_SP : UINT;
+    Temp_SP_x10 : UINT := 500;
+    NoiseEnable : UINT := 1;
+    FaultMask : UINT;
+    valve_pct : REAL;
+    err : REAL;
+    Kp : REAL := 0.15;
+    alive : BOOL;
+    tHighLevel : TON;
+    tHighTemp : TON;
+  END_VAR
+  VAR_EXTERNAL
+    IW100_W : WORD;
+    IW101_W : WORD;
+    IW102_W : WORD;
+    IW103_W : WORD;
+    IW104_W : WORD;
+    IW105_W : WORD;
+    IX100_2_B : BOOL;
+    IX100_3_B : BOOL;
+    QX100_0_B : BOOL;
+    QX100_1_B : BOOL;
+    QX100_2_B : BOOL;
+    QX100_3_B : BOOL;
+    QW100_W : WORD;
+    QW101_W : WORD;
+    QW102_W : WORD;
+    QW103_W : WORD;
+    QW104_W : WORD;
+  END_VAR
+
+  (* ===== INPUT DECODE (via external aliases) ===== *)
+  Level_cm     := INT_TO_UINT(WORD_TO_INT(IW100_W));                     (* HR1000 *)
+  Q_in_lps     := INT_TO_UINT(WORD_TO_INT(IW101_W));                     (* HR1001 *)
+  Q_out_lps    := INT_TO_UINT(WORD_TO_INT(IW102_W));                     (* HR1002 *)
+  Temp_C       := INT_TO_REAL(WORD_TO_INT(IW103_W)) / 10.0;              (* HR1003 x0.1 °C *)
+  Pressure_kPa := INT_TO_UINT(WORD_TO_INT(IW104_W));                     (* HR1004 *)
+  StatusWord   := INT_TO_UINT(WORD_TO_INT(IW105_W));                     (* HR1005 *)
+
+  HighLevel_DI := IX100_2_B;    (* DI high level *)
+  HighTemp_DI  := IX100_3_B;    (* DI high temp  *)
+
+  (* ===== ALARM QUALIFICATION (2s) ===== *)
+  tHighLevel(IN := HighLevel_DI, PT := T#2S);
+  tHighTemp (IN := HighTemp_DI,  PT := T#2S);
+  HL_Alarm := tHighLevel.Q;
+  HT_Alarm := tHighTemp.Q;
+
+  (* ===== SIMPLE DEFAULTS ===== *)
+  IF Temp_SP_C < 10.0 THEN Temp_SP_C := 50.0; END_IF;   (* °C *)
+  IF Level_SP   = 0     THEN Level_SP   := 600;  END_IF; (* cm *)
+
+  (* ===== PUMP ON/OFF WITH HYSTERESIS ===== *)
+  IF Level_cm < 450 THEN
+      PumpCmd := TRUE;                 (* fill *)
+  ELSIF Level_cm > 800 THEN
+      PumpCmd := FALSE;                (* stop filling *)
+  END_IF;
+
+  (* ===== HEATER HYSTERESIS ===== *)
+  IF Temp_C < (Temp_SP_C - 1.0) THEN
+      HeaterCmd := TRUE;
+  ELSIF Temp_C > (Temp_SP_C + 1.0) THEN
+      HeaterCmd := FALSE;
+  END_IF;
+
+  (* ===== VALVE PROPORTIONAL TRIM ===== *)
+  err := INT_TO_REAL(UINT_TO_INT(Level_SP)) - INT_TO_REAL(UINT_TO_INT(Level_cm));   (* +err => level low *)
+  valve_pct := valve_pct + Kp * err;                      (* P-only *)
+  IF valve_pct < 0.0 THEN valve_pct := 0.0; END_IF;
+  IF valve_pct > 100.0 THEN valve_pct := 100.0; END_IF;
+
+  (* ===== WRITE COMMANDS / SETPOINTS (via external aliases) ===== *)
+  QX100_0_B := PumpCmd;                 (* coil 0: pump *)
+  QX100_1_B := HeaterCmd;               (* coil 1: heater *)
+  QX100_2_B := ManualMode;              (* coil 2: manual/auto flag *)
+
+  Inflow_SP      := 60;                             (* L/s nominal *)
+  ValvePct_SP    := REAL_TO_UINT(valve_pct);        (* 0..100% *)
+  Temp_SP_x10    := REAL_TO_UINT(Temp_SP_C * 10.0); (* HR expects x0.1 °C *)
+  NoiseEnable    := 1;                              (* keep sensor noise on *)
+  FaultMask      := 0;                              (* set bits to inject faults *)
+
+  QW100_W := UINT_TO_WORD(Inflow_SP);
+  QW101_W := UINT_TO_WORD(ValvePct_SP);
+  QW102_W := UINT_TO_WORD(Temp_SP_x10);
+  QW103_W := UINT_TO_WORD(NoiseEnable);
+  QW104_W := UINT_TO_WORD(FaultMask);
+
+  (* Optional: auto fault-reset pulse when clear *)
+  IF (NOT HL_Alarm) AND (NOT HT_Alarm) THEN
+      QX100_3_B := FALSE;               (* coil 3 low *)
+  END_IF;
+
+  (* ===== HEARTBEAT ===== *)
+  alive := NOT alive;
+END_PROGRAM
+
+
+CONFIGURATION Config0
+
+  RESOURCE Res0 ON PLC
+    VAR_GLOBAL
+      IW100_W AT %IW100 : WORD;
+      IW101_W AT %IW101 : WORD;
+      IW102_W AT %IW102 : WORD;
+      IW103_W AT %IW103 : WORD;
+      IW104_W AT %IW104 : WORD;
+      IW105_W AT %IW105 : WORD;
+      IX100_2_B AT %IX100.2 : BOOL;
+      IX100_3_B AT %IX100.3 : BOOL;
+      QX100_0_B AT %QX100.0 : BOOL;
+      QX100_1_B AT %QX100.1 : BOOL;
+      QX100_2_B AT %QX100.2 : BOOL;
+      QX100_3_B AT %QX100.3 : BOOL;
+      QW100_W AT %QW100 : WORD;
+      QW101_W AT %QW101 : WORD;
+      QW102_W AT %QW102 : WORD;
+      QW103_W AT %QW103 : WORD;
+      QW104_W AT %QW104 : WORD;
+    END_VAR
+    TASK MainTask(INTERVAL := T#100ms,PRIORITY := 1);
+    PROGRAM MainInst WITH MainTask : programTest;
+  END_RESOURCE
+END_CONFIGURATION
+
+(*DBG:char md5[] = "005e94c4326b36f9ea9b9afc74702d49";*)
+(*DBG:/**)
+(*DBG: * This file is part of OpenPLC Runtime*)
+(*DBG: **)
+(*DBG: * Copyright (C) 2023 Autonomy, GP Orcullo*)
+(*DBG: * Based on the work by GP Orcullo on Beremiz for uC*)
+(*DBG: **)
+(*DBG: * This program is free software; you can redistribute it and/or*)
+(*DBG: * modify it under the terms of the GNU General Public License*)
+(*DBG: * as published by the Free Software Foundation; either version 2*)
+(*DBG: * of the License, or (at your option) any later version.*)
+(*DBG: **)
+(*DBG: * This program is distributed in the hope that it will be useful,*)
+(*DBG: * but WITHOUT ANY WARRANTY; without even the implied warranty of*)
+(*DBG: * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the*)
+(*DBG: * GNU General Public License for more details.*)
+(*DBG: **)
+(*DBG: * You should have received a copy of the GNU General Public License*)
+(*DBG: * along with this program; If not, see <http://www.gnu.org/licenses/>.*)
+(*DBG: **)
+(*DBG: */*)
+(*DBG:*)
+(*DBG:#include <stdbool.h>*)
+(*DBG:*)
+(*DBG:#include "iec_types_all.h"*)
+(*DBG:#include "POUS.h"*)
+(*DBG:*)
+(*DBG:#define SAME_ENDIANNESS      0*)
+(*DBG:#define REVERSE_ENDIANNESS   1*)
+(*DBG:*)
+(*DBG:uint8_t endianness;*)
+(*DBG:*)
+(*DBG:*)
+(*DBG:extern __IEC_WORD_p RES0__IW100_W;*)
+(*DBG:extern __IEC_WORD_p RES0__IW101_W;*)
+(*DBG:extern __IEC_WORD_p RES0__IW102_W;*)
+(*DBG:extern __IEC_WORD_p RES0__IW103_W;*)
+(*DBG:extern __IEC_WORD_p RES0__IW104_W;*)
+(*DBG:extern __IEC_WORD_p RES0__IW105_W;*)
+(*DBG:extern __IEC_BOOL_p RES0__IX100_2_B;*)
+(*DBG:extern __IEC_BOOL_p RES0__IX100_3_B;*)
+(*DBG:extern __IEC_BOOL_p RES0__QX100_0_B;*)
+(*DBG:extern __IEC_BOOL_p RES0__QX100_1_B;*)
+(*DBG:extern __IEC_BOOL_p RES0__QX100_2_B;*)
+(*DBG:extern __IEC_BOOL_p RES0__QX100_3_B;*)
+(*DBG:extern __IEC_WORD_p RES0__QW100_W;*)
+(*DBG:extern __IEC_WORD_p RES0__QW101_W;*)
+(*DBG:extern __IEC_WORD_p RES0__QW102_W;*)
+(*DBG:extern __IEC_WORD_p RES0__QW103_W;*)
+(*DBG:extern __IEC_WORD_p RES0__QW104_W;*)
+(*DBG:extern PROGRAMTEST RES0__MAININST;*)
+(*DBG:*)
+(*DBG:static const struct {*)
+(*DBG:    void *ptr;*)
+(*DBG:    __IEC_types_enum type;*)
+(*DBG:} debug_vars[] = {*)
+(*DBG:    {&(RES0__IW100_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__IW101_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__IW102_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__IW103_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__IW104_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__IW105_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__IX100_2_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__IX100_3_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__QX100_0_B), BOOL_O_ENUM},*)
+(*DBG:    {&(RES0__QX100_1_B), BOOL_O_ENUM},*)
+(*DBG:    {&(RES0__QX100_2_B), BOOL_O_ENUM},*)
+(*DBG:    {&(RES0__QX100_3_B), BOOL_O_ENUM},*)
+(*DBG:    {&(RES0__QW100_W), WORD_O_ENUM},*)
+(*DBG:    {&(RES0__QW101_W), WORD_O_ENUM},*)
+(*DBG:    {&(RES0__QW102_W), WORD_O_ENUM},*)
+(*DBG:    {&(RES0__QW103_W), WORD_O_ENUM},*)
+(*DBG:    {&(RES0__QW104_W), WORD_O_ENUM},*)
+(*DBG:    {&(RES0__MAININST.LEVEL_CM), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.Q_IN_LPS), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.Q_OUT_LPS), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.TEMP_C), REAL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.PRESSURE_KPA), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.STATUSWORD), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.HIGHLEVEL_DI), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.HIGHTEMP_DI), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.HL_ALARM), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.HT_ALARM), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.PUMPCMD), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.HEATERCMD), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.MANUALMODE), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.LEVEL_SP), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.TEMP_SP_C), REAL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.INFLOW_SP), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.VALVEPCT_SP), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.TEMP_SP_X10), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.NOISEENABLE), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.FAULTMASK), UINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.VALVE_PCT), REAL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.ERR), REAL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.KP), REAL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.ALIVE), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.EN), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.ENO), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.IN), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.PT), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.Q), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.ET), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.STATE), SINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.PREV_IN), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.CURRENT_TIME), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHLEVEL.START_TIME), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.EN), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.ENO), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.IN), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.PT), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.Q), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.ET), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.STATE), SINT_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.PREV_IN), BOOL_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.CURRENT_TIME), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.THIGHTEMP.START_TIME), TIME_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IW100_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IW101_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IW102_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IW103_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IW104_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IW105_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IX100_2_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.IX100_3_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QX100_0_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QX100_1_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QX100_2_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QX100_3_B), BOOL_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QW100_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QW101_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QW102_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QW103_W), WORD_P_ENUM},*)
+(*DBG:    {&(RES0__MAININST.QW104_W), WORD_P_ENUM},*)
+(*DBG:};*)
+(*DBG:*)
+(*DBG:#define VAR_COUNT               78*)
+(*DBG:*)
+(*DBG:uint16_t get_var_count(void)*)
+(*DBG:{*)
+(*DBG:    return VAR_COUNT;*)
+(*DBG:}*)
+(*DBG:*)
+(*DBG:size_t get_var_size(size_t idx)*)
+(*DBG:{*)
+(*DBG:    if (idx >= VAR_COUNT)*)
+(*DBG:    {*)
+(*DBG:        return 0;*)
+(*DBG:    }*)
+(*DBG:    switch (debug_vars[idx].type) {*)
+(*DBG:    case SINT_ENUM:*)
+(*DBG:        return sizeof(SINT);*)
+(*DBG:    case UINT_ENUM:*)
+(*DBG:        return sizeof(UINT);*)
+(*DBG:    case TIME_ENUM:*)
+(*DBG:        return sizeof(TIME);*)
+(*DBG:    case REAL_ENUM:*)
+(*DBG:        return sizeof(REAL);*)
+(*DBG:    case WORD_O_ENUM:*)
+(*DBG:    case WORD_P_ENUM:*)
+(*DBG:        return sizeof(WORD);*)
+(*DBG:    case BOOL_ENUM:*)
+(*DBG:    case BOOL_O_ENUM:*)
+(*DBG:    case BOOL_P_ENUM:*)
+(*DBG:        return sizeof(BOOL);*)
+(*DBG:    default:*)
+(*DBG:        return 0;*)
+(*DBG:    }*)
+(*DBG:}*)
+(*DBG:*)
+(*DBG:void *get_var_addr(size_t idx)*)
+(*DBG:{*)
+(*DBG:    void *ptr = debug_vars[idx].ptr;*)
+(*DBG:*)
+(*DBG:    switch (debug_vars[idx].type) {*)
+(*DBG:    case SINT_ENUM:*)
+(*DBG:        return (void *)&((__IEC_SINT_t *) ptr)->value;*)
+(*DBG:    case UINT_ENUM:*)
+(*DBG:        return (void *)&((__IEC_UINT_t *) ptr)->value;*)
+(*DBG:    case TIME_ENUM:*)
+(*DBG:        return (void *)&((__IEC_TIME_t *) ptr)->value;*)
+(*DBG:    case REAL_ENUM:*)
+(*DBG:        return (void *)&((__IEC_REAL_t *) ptr)->value;*)
+(*DBG:    case WORD_O_ENUM:*)
+(*DBG:    case WORD_P_ENUM:*)
+(*DBG:        return (void *)((((__IEC_WORD_p *) ptr)->flags & __IEC_FORCE_FLAG) *)
+(*DBG:                        ? &(((__IEC_WORD_p *) ptr)->fvalue) *)
+(*DBG:                        : ((__IEC_WORD_p *) ptr)->value);*)
+(*DBG:    case BOOL_ENUM:*)
+(*DBG:        return (void *)&((__IEC_BOOL_t *) ptr)->value;*)
+(*DBG:    case BOOL_O_ENUM:*)
+(*DBG:    case BOOL_P_ENUM:*)
+(*DBG:        return (void *)((((__IEC_BOOL_p *) ptr)->flags & __IEC_FORCE_FLAG) *)
+(*DBG:                        ? &(((__IEC_BOOL_p *) ptr)->fvalue) *)
+(*DBG:                        : ((__IEC_BOOL_p *) ptr)->value);*)
+(*DBG:    default:*)
+(*DBG:        return 0;*)
+(*DBG:    }*)
+(*DBG:}*)
+(*DBG:*)
+(*DBG:void force_var(size_t idx, bool forced, void *val)*)
+(*DBG:{*)
+(*DBG:    void *ptr = debug_vars[idx].ptr;*)
+(*DBG:*)
+(*DBG:    if (forced) {*)
+(*DBG:        size_t var_size = get_var_size(idx);*)
+(*DBG:        switch (debug_vars[idx].type) {*)
+(*DBG:        case SINT_ENUM: {*)
+(*DBG:            memcpy(&((__IEC_SINT_t *) ptr)->value, val, var_size);*)
+(*DBG:            //((__IEC_SINT_t *) ptr)->value = *((SINT *) val);*)
+(*DBG:            ((__IEC_SINT_t *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case UINT_ENUM: {*)
+(*DBG:            memcpy(&((__IEC_UINT_t *) ptr)->value, val, var_size);*)
+(*DBG:            //((__IEC_UINT_t *) ptr)->value = *((UINT *) val);*)
+(*DBG:            ((__IEC_UINT_t *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case TIME_ENUM: {*)
+(*DBG:            memcpy(&((__IEC_TIME_t *) ptr)->value, val, var_size);*)
+(*DBG:            //((__IEC_TIME_t *) ptr)->value = *((TIME *) val);*)
+(*DBG:            ((__IEC_TIME_t *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case REAL_ENUM: {*)
+(*DBG:            memcpy(&((__IEC_REAL_t *) ptr)->value, val, var_size);*)
+(*DBG:            //((__IEC_REAL_t *) ptr)->value = *((REAL *) val);*)
+(*DBG:            ((__IEC_REAL_t *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case WORD_O_ENUM: {*)
+(*DBG:            memcpy((((__IEC_WORD_p *) ptr)->value), val, var_size);*)
+(*DBG:            //*(((__IEC_WORD_p *) ptr)->value) = *((WORD *) val);*)
+(*DBG:            ((__IEC_WORD_p *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case WORD_P_ENUM: {*)
+(*DBG:            memcpy(&((__IEC_WORD_p *) ptr)->fvalue, val, var_size);*)
+(*DBG:            //((__IEC_WORD_p *) ptr)->fvalue = *((WORD *) val);*)
+(*DBG:            ((__IEC_WORD_p *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case BOOL_ENUM: {*)
+(*DBG:            memcpy(&((__IEC_BOOL_t *) ptr)->value, val, var_size);*)
+(*DBG:            //((__IEC_BOOL_t *) ptr)->value = *((BOOL *) val);*)
+(*DBG:            ((__IEC_BOOL_t *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case BOOL_O_ENUM: {*)
+(*DBG:            memcpy((((__IEC_BOOL_p *) ptr)->value), val, var_size);*)
+(*DBG:            //*(((__IEC_BOOL_p *) ptr)->value) = *((BOOL *) val);*)
+(*DBG:            ((__IEC_BOOL_p *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        case BOOL_P_ENUM: {*)
+(*DBG:            memcpy(&((__IEC_BOOL_p *) ptr)->fvalue, val, var_size);*)
+(*DBG:            //((__IEC_BOOL_p *) ptr)->fvalue = *((BOOL *) val);*)
+(*DBG:            ((__IEC_BOOL_p *) ptr)->flags |= __IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:        default:*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:    } else {*)
+(*DBG:        switch (debug_vars[idx].type) {*)
+(*DBG:        case SINT_ENUM:*)
+(*DBG:            ((__IEC_SINT_t *) ptr)->flags &= ~__IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        case UINT_ENUM:*)
+(*DBG:            ((__IEC_UINT_t *) ptr)->flags &= ~__IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        case TIME_ENUM:*)
+(*DBG:            ((__IEC_TIME_t *) ptr)->flags &= ~__IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        case REAL_ENUM:*)
+(*DBG:            ((__IEC_REAL_t *) ptr)->flags &= ~__IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        case WORD_O_ENUM:*)
+(*DBG:        case WORD_P_ENUM:*)
+(*DBG:            ((__IEC_WORD_p *) ptr)->flags &= ~__IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        case BOOL_ENUM:*)
+(*DBG:            ((__IEC_BOOL_t *) ptr)->flags &= ~__IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        case BOOL_O_ENUM:*)
+(*DBG:        case BOOL_P_ENUM:*)
+(*DBG:            ((__IEC_BOOL_p *) ptr)->flags &= ~__IEC_FORCE_FLAG;*)
+(*DBG:            break;*)
+(*DBG:        default:*)
+(*DBG:            break;*)
+(*DBG:        }*)
+(*DBG:    }*)
+(*DBG:}*)
+(*DBG:*)
+(*DBG:void swap_bytes(void *ptr, size_t size) *)
+(*DBG:{*)
+(*DBG:    uint8_t *bytePtr = (uint8_t *)ptr;*)
+(*DBG:    size_t i;*)
+(*DBG:    for (i = 0; i < size / 2; ++i) *)
+(*DBG:    {*)
+(*DBG:        uint8_t temp = bytePtr[i];*)
+(*DBG:        bytePtr[i] = bytePtr[size - 1 - i];*)
+(*DBG:        bytePtr[size - 1 - i] = temp;*)
+(*DBG:    }*)
+(*DBG:}*)
+(*DBG:*)
+(*DBG:void trace_reset(void)*)
+(*DBG:{*)
+(*DBG:    for (size_t i=0; i < VAR_COUNT; i++) *)
+(*DBG:    {*)
+(*DBG:        force_var(i, false, 0);*)
+(*DBG:    }*)
+(*DBG:}*)
+(*DBG:*)
+(*DBG:void set_trace(size_t idx, bool forced, void *val)*)
+(*DBG:{*)
+(*DBG:    if (idx >= 0 && idx < VAR_COUNT) *)
+(*DBG:    {*)
+(*DBG:        if (endianness == REVERSE_ENDIANNESS)*)
+(*DBG:        {*)
+(*DBG:            // Aaaaarghhhh... Stupid AVR is Big Endian.*)
+(*DBG:            swap_bytes(val, get_var_size(idx));*)
+(*DBG:        }*)
+(*DBG:*)
+(*DBG:        force_var(idx, forced, val);*)
+(*DBG:    }*)
+(*DBG:}*)
+(*DBG:*)
+(*DBG:void set_endianness(uint8_t value)*)
+(*DBG:{*)
+(*DBG:    if (value == SAME_ENDIANNESS || value == REVERSE_ENDIANNESS)*)
+(*DBG:    {*)
+(*DBG:        endianness = value;*)
+(*DBG:    }*)
+(*DBG:}*)
+(*DBG:*)
