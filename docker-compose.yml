@@ -51,7 +51,7 @@ services:
       tty: true
       environment:
         HOST: "0.0.0.0"
-        PORT: "5020"
+        PORT: "502"
         UNIT_ID: "1"
 
 
